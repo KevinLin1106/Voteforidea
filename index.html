@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>極簡投票系統</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 QRCode.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        'warm-white': '#FCFAF2',
+                        'warm-yellow': '#F3E5AB',
+                        'dark-warm': '#5C4E3A'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { font-family: 'Helvetica Neue', Helvetica, Arial, '微軟正黑體', sans-serif; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body class="bg-warm-white text-dark-warm min-h-screen flex items-center justify-center p-4">
+
+    <div class="bg-white rounded-2xl shadow-sm border border-warm-yellow w-full max-w-md p-6 md:p-8">
+        
+        <!-- 區塊 1: 建立投票 -->
+        <div id="create-section">
+            <h1 class="text-2xl font-bold mb-6 text-center">發起新投票</h1>
+            <div class="space-y-4">
+                <div>
+                    <label class="block text-sm mb-1">投票題目</label>
+                    <input type="text" id="poll-title" class="w-full border-b-2 border-warm-yellow focus:border-yellow-500 outline-none py-2 bg-transparent" placeholder="輸入題目...">
+                </div>
+                <div>
+                    <label class="block text-sm mb-1">選項 (每行一個)</label>
+                    <textarea id="poll-options" rows="4" class="w-full border-2 border-warm-yellow rounded-lg focus:border-yellow-500 outline-none p-2 bg-transparent" placeholder="選項一&#10;選項二&#10;選項三..."></textarea>
+                </div>
+                <div>
+                    <label class="block text-sm mb-1">每人可投票數</label>
+                    <input type="number" id="poll-max-votes" value="1" min="1" class="w-full border-b-2 border-warm-yellow focus:border-yellow-500 outline-none py-2 bg-transparent">
+                </div>
+                <button id="create-btn" class="w-full bg-warm-yellow hover:bg-yellow-300 text-dark-warm font-bold py-3 rounded-xl transition duration-200">產生投票與 QR Code</button>
+            </div>
+            
+            <!-- QR Code 顯示區塊 -->
+            <div id="qr-section" class="hidden mt-6 flex flex-col items-center">
+                <p class="text-sm mb-3">請掃描下方 QR Code 或複製網址讓大家投票：</p>
+                <div id="qrcode" class="mb-4"></div>
+                <input type="text" id="share-url" class="w-full text-xs border border-gray-200 p-2 rounded bg-gray-50 text-center" readonly>
+            </div>
+        </div>
+
+        <!-- 區塊 2: 進行投票 -->
+        <div id="vote-section" class="hidden">
+            <h1 id="vote-title" class="text-2xl font-bold mb-2 text-center">載入中...</h1>
+            <p id="vote-instruction" class="text-sm text-center mb-6 text-gray-500"></p>
+            <div id="vote-options" class="space-y-3 mb-6"></div>
+            <button id="submit-vote-btn" class="w-full bg-warm-yellow hover:bg-yellow-300 text-dark-warm font-bold py-3 rounded-xl transition duration-200">送出投票</button>
+        </div>
+
+        <!-- 區塊 3: 投票結果 -->
+        <div id="result-section" class="hidden">
+            <h1 id="result-title" class="text-2xl font-bold mb-6 text-center">投票結果</h1>
+            <div id="result-list" class="space-y-4 mb-6"></div>
+            <button id="back-to-create" class="w-full border border-warm-yellow text-dark-warm hover:bg-warm-yellow font-bold py-3 rounded-xl transition duration-200">發起新投票</button>
+        </div>
+
+    </div>
+
+    <!-- 引入 Firebase Modular SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getFirestore, collection, addDoc, getDoc, doc, updateDoc, increment } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        // ！！！請將下方的 firebaseConfig 替換成你自己的設定！！！
+        const firebaseConfig = {
+            apiKey: "AIzaSyCzLjdgzH_dbAOaaCD_B7HsHf2pL66UlRY",
+            authDomain: "voteforidea.firebaseapp.com",
+            projectId: "voteforidea",
+            storageBucket: "voteforidea.firebasestorage.app",
+            messagingSenderId: "368682464327",
+            appId: "1:368682464327:web:c456a2b032e40c20906d62"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        // UI 元素
+        const createSec = document.getElementById('create-section');
+        const voteSec = document.getElementById('vote-section');
+        const resultSec = document.getElementById('result-section');
+        
+        // 取得網址參數以判斷是發起者還是投票者
+        const urlParams = new URLSearchParams(window.location.search);
+        const pollId = urlParams.get('id');
+
+        if (pollId) {
+            // 如果網址有帶 id，表示是來投票或看結果的
+            createSec.classList.add('hidden');
+            checkIfVoted(pollId);
+        }
+
+        // --- 發起投票邏輯 ---
+        document.getElementById('create-btn').addEventListener('click', async () => {
+            const title = document.getElementById('poll-title').value.trim();
+            const optionsText = document.getElementById('poll-options').value.trim();
+            const maxVotes = parseInt(document.getElementById('poll-max-votes').value);
+
+            if (!title || !optionsText || maxVotes < 1) {
+                alert("請填寫完整資訊"); return;
+            }
+
+            const optionsArray = optionsText.split('\n').map(opt => opt.trim()).filter(opt => opt);
+            let optionsObj = {};
+            optionsArray.forEach(opt => { optionsObj[opt] = 0; }); // 初始化票數為0
+
+            try {
+                const docRef = await addDoc(collection(db, "polls"), {
+                    title: title,
+                    options: optionsObj,
+                    maxVotes: maxVotes,
+                    createdAt: new Date()
+                });
+
+                // 產生分享網址與 QR Code
+                const shareUrl = `${window.location.origin}${window.location.pathname}?id=${docRef.id}`;
+                document.getElementById('share-url').value = shareUrl;
+                document.getElementById('qr-section').classList.remove('hidden');
+                document.getElementById('qrcode').innerHTML = ""; // 清空舊的
+                new QRCode(document.getElementById('qrcode'), {
+                    text: shareUrl,
+                    width: 150,
+                    height: 150,
+                    colorDark : "#5C4E3A",
+                    colorLight : "#ffffff",
+                    correctLevel : QRCode.CorrectLevel.H
+                });
+                document.getElementById('create-btn').classList.add('hidden');
+            } catch (e) {
+                console.error("Error adding document: ", e);
+            }
+        });
+
+        // --- 檢查是否已投票 (透過 localStorage 防止同設備重複投票) ---
+        async function checkIfVoted(id) {
+            const hasVoted = localStorage.getItem(`voted_${id}`);
+            if (hasVoted) {
+                showResults(id);
+            } else {
+                loadPollForVoting(id);
+            }
+        }
+
+        // --- 載入投票畫面 ---
+        async function loadPollForVoting(id) {
+            const docRef = doc(db, "polls", id);
+            const docSnap = await getDoc(docRef);
+
+            if (docSnap.exists()) {
+                voteSec.classList.remove('hidden');
+                const data = docSnap.data();
+                document.getElementById('vote-title').textContent = data.title;
+                document.getElementById('vote-instruction').textContent = `每人最多可選擇 ${data.maxVotes} 項`;
+                
+                const optionsContainer = document.getElementById('vote-options');
+                Object.keys(data.options).forEach(opt => {
+                    const div = document.createElement('div');
+                    div.className = "flex items-center p-3 border border-warm-yellow rounded-xl hover:bg-amber-50 cursor-pointer transition";
+                    const inputType = data.maxVotes === 1 ? 'radio' : 'checkbox';
+                    div.innerHTML = `
+                        <input type="${inputType}" name="poll-option" value="${opt}" class="mr-3 w-5 h-5 accent-yellow-600">
+                        <label class="w-full cursor-pointer">${opt}</label>
+                    `;
+                    // 讓點擊整行都能勾選
+                    div.addEventListener('click', (e) => {
+                        if(e.target.tagName !== 'INPUT') {
+                            const input = div.querySelector('input');
+                            input.checked = !input.checked;
+                        }
+                    });
+                    optionsContainer.appendChild(div);
+                });
+
+                // 送出投票
+                document.getElementById('submit-vote-btn').onclick = async () => {
+                    const selected = Array.from(document.querySelectorAll('input[name="poll-option"]:checked')).map(el => el.value);
+                    if (selected.length === 0) { alert("請至少選擇一個選項！"); return; }
+                    if (selected.length > data.maxVotes) { alert(`最多只能選擇 ${data.maxVotes} 項！`); return; }
+
+                    let updates = {};
+                    selected.forEach(opt => {
+                        updates[`options.${opt}`] = increment(1);
+                    });
+
+                    await updateDoc(docRef, updates);
+                    localStorage.setItem(`voted_${id}`, 'true'); // 紀錄該設備已投票
+                    voteSec.classList.add('hidden');
+                    showResults(id);
+                };
+
+            } else {
+                alert("找不到該投票活動！");
+            }
+        }
+
+        // --- 顯示投票結果 ---
+        async function showResults(id) {
+            resultSec.classList.remove('hidden');
+            const docRef = doc(db, "polls", id);
+            const docSnap = await getDoc(docRef);
+
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                document.getElementById('result-title').textContent = data.title;
+                
+                // 將物件轉為陣列並依票數高低排序
+                const sortedOptions = Object.entries(data.options).sort((a, b) => b[1] - a[1]);
+                const totalVotes = sortedOptions.reduce((acc, curr) => acc + curr[1], 0);
+
+                const resultContainer = document.getElementById('result-list');
+                resultContainer.innerHTML = '';
+
+                sortedOptions.forEach(([opt, count]) => {
+                    const percentage = totalVotes === 0 ? 0 : Math.round((count / totalVotes) * 100);
+                    resultContainer.innerHTML += `
+                        <div>
+                            <div class="flex justify-between text-sm mb-1">
+                                <span>${opt}</span>
+                                <span class="font-bold">${count} 票 (${percentage}%)</span>
+                            </div>
+                            <div class="w-full bg-orange-100 rounded-full h-2.5">
+                                <div class="bg-yellow-400 h-2.5 rounded-full" style="width: ${percentage}%"></div>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+        }
+
+        document.getElementById('back-to-create').onclick = () => {
+            window.location.href = window.location.pathname; // 重整回首頁
+        };
+    </script>
+</body>
+</html>
